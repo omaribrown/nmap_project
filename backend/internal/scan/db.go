@@ -61,8 +61,6 @@ func (db *DBClient) QueryByHost(ctx context.Context, IPs []string) ([]ScanResult
 		args[i] = IP
 	}
 
-	db.Logger.Debug("placeholders", zap.Any("placeholders", placeholders), zap.Any("args", args))
-
 	// Build the query
 	query := fmt.Sprintf(`
 		SELECT ip, scan_time, scan_id
@@ -70,7 +68,6 @@ func (db *DBClient) QueryByHost(ctx context.Context, IPs []string) ([]ScanResult
 		WHERE ip IN (%s)
 	`, strings.Join(placeholders, ", "))
 
-	db.Logger.Debug("query", zap.Any("query", query))
 	rows, err := db.DB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("error executing query: %w", err)
@@ -78,7 +75,6 @@ func (db *DBClient) QueryByHost(ctx context.Context, IPs []string) ([]ScanResult
 
 	defer rows.Close()
 
-	db.Logger.Debug("rows", zap.Any("rows", rows))
 	var results []ScanResult
 	for rows.Next() {
 		var result ScanResult
@@ -94,7 +90,6 @@ func (db *DBClient) QueryByHost(ctx context.Context, IPs []string) ([]ScanResult
 			return nil, fmt.Errorf("error parsing scan time: %w", err)
 		}
 
-		db.Logger.Debug("result: ", zap.Any("result", result), zap.Any("scanID", scanID))
 		// Retrieve Ports for this host
 		portQuery := "SELECT port_number, status FROM port_results WHERE scan_id = ?"
 		portRows, err := db.DB.QueryContext(ctx, portQuery, scanID)
@@ -102,7 +97,6 @@ func (db *DBClient) QueryByHost(ctx context.Context, IPs []string) ([]ScanResult
 			return nil, fmt.Errorf("error executing port query: %w", err)
 		}
 
-		db.Logger.Debug("portRows", zap.Any("portRows", portRows))
 		result.Ports = make(map[int]PortStatus)
 
 		for portRows.Next() {
@@ -113,7 +107,6 @@ func (db *DBClient) QueryByHost(ctx context.Context, IPs []string) ([]ScanResult
 				return nil, fmt.Errorf("error scanning port row: %w", err)
 			}
 			result.Ports[portNumber] = PortStatus(status)
-			db.Logger.Debug("port", zap.Any("port", portNumber), zap.Any("status", status))
 		}
 
 		// Retrieve Changes for the port map's keys
@@ -126,8 +119,6 @@ func (db *DBClient) QueryByHost(ctx context.Context, IPs []string) ([]ScanResult
 			changeArgs[i] = portNumber
 			i++
 		}
-
-		db.Logger.Debug("changePlaceholders", zap.Any("changePlaceholders", changePlaceholders), zap.Any("changeArgs", changeArgs))
 
 		changeQuery := fmt.Sprintf(`
 	SELECT pc.change_type, pr.port_number
@@ -144,8 +135,6 @@ func (db *DBClient) QueryByHost(ctx context.Context, IPs []string) ([]ScanResult
 			return nil, fmt.Errorf("error executing change query: %w", err)
 		}
 
-		db.Logger.Debug("changeRows", zap.Any("changeRows", changeRows))
-
 		for changeRows.Next() {
 			var change string
 			var portNumber int
@@ -157,7 +146,6 @@ func (db *DBClient) QueryByHost(ctx context.Context, IPs []string) ([]ScanResult
 		}
 
 		results = append(results, result)
-		db.Logger.Info("results", zap.Any("results", results))
 	}
 
 	if err := rows.Err(); err != nil {
@@ -195,9 +183,11 @@ func (db *DBClient) InsertScanResults(ctx context.Context, scan ScanResult) erro
 		return err
 	}
 
+	db.Logger.Debug("scanID", zap.Any("scanID", scanID))
+
 	// Insert individual port results
 	for port, status := range scan.Ports {
-		portRes, err := tx.ExecContext(ctx, `INSERT INTO port_results (scan_id, port_number, status) VALUES (?, ?, ?)`, scanID, port, string(status))
+		portRes, err := tx.ExecContext(ctx, `INSERT INTO port_results (scan_id, port_number, status, scan_time) VALUES (?, ?, ?, ?)`, scanID, port, string(status), scan.ScanTime)
 		if err != nil {
 			tx.Rollback()
 			return err
@@ -246,16 +236,12 @@ func (db *DBClient) UpdateScanResults(ctx context.Context, scan ScanResult) erro
 		return err
 	}
 
-	db.Logger.Debug("scanID", zap.Any("scanID", scanID))
-
 	// Update the main scan_results table
 	_, err = tx.ExecContext(ctx, `UPDATE scan_results SET scan_time = ? WHERE scan_id = ?`, scan.ScanTime, scanID)
 	if err != nil {
 		tx.Rollback()
 		return err
 	}
-
-	db.Logger.Debug("scanTime", zap.Any("scanTime", scan.ScanTime))
 
 	// Update individual port results and port changes
 	for port, status := range scan.Ports {
@@ -267,16 +253,12 @@ func (db *DBClient) UpdateScanResults(ctx context.Context, scan ScanResult) erro
 			return err
 		}
 
-		db.Logger.Debug("portID", zap.Any("portID", portID))
-
 		// Update port result
 		_, err = tx.ExecContext(ctx, `UPDATE port_results SET status = ? WHERE port_id = ?`, string(status), portID)
 		if err != nil {
 			tx.Rollback()
 			return err
 		}
-
-		db.Logger.Debug("portStatus", zap.Any("portStatus", string(status)))
 
 		// Insert port changes if any
 		for _, change := range scan.Changes {
@@ -285,8 +267,6 @@ func (db *DBClient) UpdateScanResults(ctx context.Context, scan ScanResult) erro
 				tx.Rollback()
 				return err
 			}
-
-			db.Logger.Debug("change", zap.Any("change", string(change)))
 		}
 
 		// Insert port scan history
@@ -339,8 +319,6 @@ func (db *DBClient) QueryByHostsAndPorts(ctx context.Context, ipAndPorts map[str
 			args[i+1] = port
 		}
 
-		db.Logger.Debug("placeholders", zap.Any("placeholders", placeholders), zap.Any("args", args))
-
 		// Construct the query for this IP and ports
 		query := fmt.Sprintf(`
 			SELECT pr.port_number, pr.status, sr.scan_time
@@ -372,7 +350,6 @@ func (db *DBClient) QueryByHostsAndPorts(ctx context.Context, ipAndPorts map[str
 				return nil, fmt.Errorf("error parsing scan time: %w", err)
 			}
 
-			db.Logger.Debug("portNumber", zap.Any("portNumber", portNumber), zap.Any("status", status), zap.Any("scanTime", scanTime))
 			portHistoriesMap[portNumber] = append(portHistoriesMap[portNumber], ScanTimeStatus{Time: scanTime, Status: status})
 		}
 
@@ -385,7 +362,6 @@ func (db *DBClient) QueryByHostsAndPorts(ctx context.Context, ipAndPorts map[str
 		ipHistories = append(ipHistories, IPHistory{IP: ip, Port: portHistories})
 	}
 
-	db.Logger.Debug("result", zap.Any("result", ipHistories))
 	result := &HistoricalScanData{Data: ipHistories}
 
 	return result, nil

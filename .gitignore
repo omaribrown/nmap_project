@@ -1,2 +1,3 @@
 backend/internal/scan/db_test.go
 backend/scripts/run.sh
+/backend/.idea*

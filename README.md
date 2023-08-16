@@ -83,8 +83,3 @@ Examples:
     ]
 }
 ```
-
-## todo:
-- consider whether we need to add the removed in comparison to the requirements. currently we only track the adds events
-- fix potential bug where history of port scans for unusual ports is not displayed
-- deploy database

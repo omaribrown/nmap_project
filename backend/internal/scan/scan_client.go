@@ -7,15 +7,13 @@ import (
 	"go.uber.org/zap"
 	"os/exec"
 	"strconv"
-	"sync"
 	"time"
 )
 
 // ScanClient represents a client for scanning ports
 type ScanClient struct {
-	Logger      *zap.Logger // Logger
-	resultsLock sync.Mutex  // Mutex to protect scanResults slice
-	DBClient    *DBClient   // Database client
+	Logger   *zap.Logger // Logger
+	DBClient *DBClient   // Database client
 }
 
 // NewScanClient creates a new ScanClient
@@ -26,260 +24,155 @@ func NewScanClient(logger *zap.Logger, DBClient *DBClient) *ScanClient {
 	}
 }
 
-// ScanPorts scans the ports for a list of IPs or hostnames
-func (s *ScanClient) ScanPorts(ctx context.Context, request ScanRequestMapped) (interface{}, error) {
-	s.Logger.Debug("scanning ports", zap.Any("request", request))
-	// scan ports
-	scanResults, err := s.scanRequestedHosts(ctx, request)
-	if err != nil {
-		s.Logger.Error("error scanning hosts", zap.Error(err))
-		return nil, err
+func (s *ScanClient) ScanForOpenPorts(ctx context.Context, request ScanRequestMapped) (*ScanResponse, error) {
+	var host Host
+	if len(request.IPs) > 0 {
+		host.IPAddress = request.IPs[0]
+	} else {
+		host.Hostname = request.Hostnames[0]
 	}
 
-	s.Logger.Debug("scan results", zap.Any("scanResults", scanResults))
-	// check database for previous scans of hosts
-	hostChanges, err := s.compareNewScanResults(ctx, scanResults)
+	// Scan the host using NMap cli
+	scannedHost, scannedPorts, err := s.execScanCommand(ctx, host)
 	if err != nil {
-		s.Logger.Error("error comparing scan results", zap.Error(err))
-		return nil, err
+		s.Logger.Error("error running nmap command", zap.Any("host", host))
+		return nil, fmt.Errorf("error running nmap command for host %s", host.IPAddress)
 	}
 
-	s.Logger.Debug("host changes", zap.Any("hostChanges", hostChanges))
-
-	// get historical scan results from database
-	historicalScanData, err := s.getScanHistory(ctx, scanResults)
-	if err != nil {
-		s.Logger.Error("error getting historical scan data", zap.Error(err))
-		return nil, err
+	if len(scannedPorts) == 0 {
+		s.Logger.Error("no ports found", zap.Any("host", host))
+		return nil, fmt.Errorf("no ports found for host %s", host.IPAddress)
 	}
 
-	s.Logger.Debug("historical scan data", zap.Any("historicalScanData", historicalScanData))
+	s.Logger.Debug("Scanned Host", zap.Any("scannedHost", scannedHost), zap.Any("scannedPorts", scannedPorts))
 
-	// update database with new and updated ports
-	err = s.updateScansDB(ctx, hostChanges)
+	// Get the port history from the database
+	portHistory, err := s.DBClient.QueryPortHistory(ctx, scannedHost.IPAddress, scannedPorts)
+	if err != nil {
+		s.Logger.Error("error querying port history", zap.Error(err))
+		return nil, fmt.Errorf("error querying port history for host %s", host.IPAddress)
+	}
+
+	s.Logger.Debug("Port History", zap.Any("portHistory", portHistory))
+
+	// Check the newest scanned host's ports against the port last scan
+	changedPorts := comparePorts(scannedPorts, portHistory)
+
+	s.Logger.Debug("Changed Ports", zap.Any("changedPorts", changedPorts))
+
+	// Update the database with the new and updated ports
+	err = s.DBClient.UpsertScanResults(ctx, scannedHost, scannedPorts)
 	if err != nil {
 		s.Logger.Error("error updating database", zap.Error(err))
-		return nil, err
+		return nil, fmt.Errorf("error updating database for host %s", host.IPAddress)
 	}
 
-	response := prepareResponse(scanResults, hostChanges, historicalScanData)
+	s.Logger.Debug("Updated Database with new and updated ports")
+
+	// Return the ports & changes
+	response := &ScanResponse{
+		ScanResults: scannedPorts,
+		Changes:     changedPorts,
+		Host:        scannedHost,
+		PortHistory: portHistory,
+	}
+
+	s.Logger.Debug("Response", zap.Any("response", response))
 
 	return response, nil
 }
 
-// execScanCommand executes an NMap scan command for a single IP address.
-func (s *ScanClient) execScanCommand(ctx context.Context, ip string, scanResults *[]ScanResult) {
+// comparePorts compares the ports of the newest scan against the last scan and returns a map where the key is the port number and the value is the change type (added, removed)
+func comparePorts(scannedPorts []*ScanResult, portHistory []*ScanResult) map[int]string {
+	// For each port in scannedPorts, we need to get the latest port status from portHistory if it exists
+	// portHistory may have multiple entries for each port, so we need to get the latest one
+	// If it doesn't exist, then we know it's a new port
+	// If it does exist, then we need to compare the status of the port in scannedPorts to the status of the port in portHistory
+	// If the status is different, then we know the port has been updated
+	// If the status is the same, then we know the port has not changed
 
-	cmd := exec.CommandContext(ctx, "nmap", "-p", "0-1000", "--open", "--stats-every", "0", "-oX", "-", "-T5", ip)
+	// Create a map of the newest scan's ports
+	scannedPortsMap := make(map[int]string)
+	for _, port := range scannedPorts {
+		scannedPortsMap[port.Port] = port.Status
+	}
+
+	// Iterate through portHistory to find the latest port status for each port
+	// Create a map of the last scan's ports
+	portHistoryMap := make(map[int]string)
+	for _, portScan := range portHistory {
+		if _, ok := portHistoryMap[portScan.Port]; !ok {
+			portHistoryMap[portScan.Port] = portScan.Status
+		}
+	}
+
+	// Compare the two maps and return a map of the changes where if the port was added or removed, the value is "added" or "removed", respectively
+	changedPorts := make(map[int]string)
+	for port := range scannedPortsMap {
+		// Check if the port exists in the portHistoryMap
+		if _, ok := portHistoryMap[port]; !ok {
+			changedPorts[port] = "added"
+		}
+	}
+
+	// Check if the any of the ports in the portHistoryMap have been removed
+	for port := range portHistoryMap {
+		// Check if the port exists in the scannedPortsMap
+		if _, ok := scannedPortsMap[port]; !ok {
+			changedPorts[port] = "removed"
+		}
+	}
+
+	return changedPorts
+}
+
+// execScanCommand executes an NMap scan command for a single IP address.
+func (s *ScanClient) execScanCommand(ctx context.Context, host Host) (Host, []*ScanResult, error) {
+	var scanParam string
+	var scanResults []*ScanResult
+
+	if host.Hostname != "" {
+		scanParam = host.Hostname
+	} else {
+		scanParam = host.IPAddress
+	}
+
+	cmd := exec.CommandContext(ctx, "nmap", "-p", "0-1000", "--open", "--stats-every", "0", "-oX", "-", "-T5", scanParam)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		s.Logger.Warn("error running nmap command", zap.String("ip", ip))
-		return
+		s.Logger.Error("error running nmap command", zap.Any("host", host))
+		return host, nil, err
 	}
 
 	var nmapRun NmapRun
 	if err := xml.Unmarshal(output, &nmapRun); err != nil {
-		s.Logger.Warn("error unmarshaling nmap output", zap.Error(err))
-		return
+		s.Logger.Error("error unmarshaling nmap output", zap.Error(err))
+		return host, nil, err
 	}
 
-	var results []ScanResult
+	//var results []ScanResult
 	nmapStartTime, err := strconv.ParseInt(nmapRun.Start, 10, 64)
 	if err != nil {
-		s.Logger.Warn("error parsing start time", zap.Error(err))
-		return
+		s.Logger.Error("error parsing start time", zap.Error(err))
+		return host, nil, err
 	}
 	scanTime := time.Unix(nmapStartTime, 0)
 
-	for _, host := range nmapRun.Hosts {
-		var scanResult ScanResult
-		scanResult.IP = host.Addresses[0].Addr
-		if ip != scanResult.IP {
-			scanResult.Host = ip
-		}
-		scanResult.ScanTime = scanTime
-		scanResult.Ports = make(map[int]PortStatus) // Initialize the map here
-		for _, port := range host.Ports {
-			s.Logger.Debug("port", zap.Any("port", port))
-			scanResult.Ports[port.PortID] = PortStatus(port.State.State)
+	for _, h := range nmapRun.Hosts {
+		if host.IPAddress != h.Addresses[0].Addr {
+			host.IPAddress = h.Addresses[0].Addr
 		}
 
-		results = append(results, scanResult)
-	}
-
-	// Append the results to scanResults
-	*scanResults = append(*scanResults, results...)
-}
-
-// scanRequestedHosts scans the requested hosts
-func (s *ScanClient) scanRequestedHosts(ctx context.Context, request ScanRequestMapped) ([]ScanResult, error) {
-	var scanResults []ScanResult
-	//var wg sync.WaitGroup
-	// Loop through all ips and hostnames
-	if len(request.IPs) > 0 {
-		s.Logger.Debug("scanning ips", zap.Any("ips", request.IPs))
-		for _, ip := range request.IPs {
-			//wg.Add(1)
-			s.execScanCommand(ctx, ip, &scanResults)
-
-		}
-	}
-
-	if len(request.Hostnames) > 0 {
-		s.Logger.Debug("scanning hostnames", zap.Any("hostnames", request.Hostnames))
-		for _, host := range request.Hostnames {
-			//wg.Add(1)
-			s.execScanCommand(ctx, host, &scanResults)
-		}
-	}
-
-	return scanResults, nil
-}
-
-// compareNewScanResults calls the database to see if there are any previous scans of the hosts, and if there are, it checks for differences in the results
-func (s *ScanClient) compareNewScanResults(ctx context.Context, scans []ScanResult) ([]ScanResult, error) {
-	// Get previous scan results from the database based on the host
-	var listOfIPs []string
-	for _, scan := range scans {
-		listOfIPs = append(listOfIPs, scan.IP)
-	}
-
-	s.Logger.Debug("listOfIPs", zap.Any("listOfIPs", listOfIPs))
-	queriedScans, err := s.DBClient.QueryByHost(ctx, listOfIPs)
-	if err != nil {
-		return nil, err
-	}
-
-	s.Logger.Debug("query results", zap.Any("queriedScans", queriedScans), zap.Any("scans", scans))
-
-	// directly compare the results for differences
-	hostChanges := compareHosts(scans, queriedScans)
-
-	return hostChanges, nil
-}
-
-// updateScansDB updates the database with the new and updated ports
-func (s *ScanClient) updateScansDB(ctx context.Context, scansToUpdate []ScanResult) error {
-	for _, scan := range scansToUpdate {
-		err := s.DBClient.UpsertScanResults(ctx, scan)
-		if err != nil {
-			return err
+		for _, port := range h.Ports {
+			s.Logger.Debug("Port", zap.Any("port", port))
+			scanResults = append(scanResults, &ScanResult{
+				IPAddress: host.IPAddress,
+				Timestamp: scanTime,
+				Port:      port.PortID,
+				Status:    port.State.State,
+			})
 		}
 
-		if err != nil {
-			return err
-		}
 	}
-	return nil
-}
-
-// getScanHistory should return the historical scan results for the hosts and ports associated
-func (s *ScanClient) getScanHistory(ctx context.Context, scans []ScanResult) (interface{}, error) {
-	var ipPortMap = make(map[string][]int)
-	for _, scan := range scans {
-		for port := range scan.Ports {
-			ipPortMap[scan.IP] = append(ipPortMap[scan.IP], port)
-		}
-	}
-
-	s.Logger.Debug("ipPortMap", zap.Any("ipPortMap", ipPortMap))
-
-	// Query DB for historical scan results
-	historicalScanData, err := s.DBClient.QueryByHostsAndPorts(ctx, ipPortMap)
-	if err != nil {
-		return nil, err
-	}
-
-	s.Logger.Debug("historicalScanData", zap.Any("historicalScanData", historicalScanData))
-	return historicalScanData, nil
-}
-
-func compareHosts(results []ScanResult, queryResults []ScanResult) []ScanResult {
-	var hostChanges []ScanResult
-
-	// Map the current scan results to a map with the host as the key
-	currentScanHostMap := make(map[string]ScanResult)
-	for _, result := range results {
-		currentScanHostMap[result.IP] = result
-	}
-
-	// Map the historical scan results to a map with the host as the key
-	historicalScanHostMap := make(map[string]ScanResult)
-	for _, result := range queryResults {
-		historicalScanHostMap[result.IP] = result
-	}
-
-	// Compare the current and historical scans
-	for currentKey, currentVal := range currentScanHostMap {
-		historicalHostVal, ok := historicalScanHostMap[currentKey]
-		if ok {
-			// Initialize the Changes map
-			currentVal.Changes = make(map[int]ChangeType)
-
-			// Check for added or updated ports
-			for currentPortNumber, currentPortStatus := range currentVal.Ports {
-				historicalPortStatus, ok := historicalHostVal.Ports[currentPortNumber]
-				if !ok {
-					currentVal.Changes[currentPortNumber] = "added"
-				} else if currentPortStatus != historicalPortStatus {
-					currentVal.Changes[currentPortNumber] = "updated"
-				}
-			}
-
-			// Check for removed ports
-			for historicalPortNumber := range historicalHostVal.Ports {
-				if _, ok := currentVal.Ports[historicalPortNumber]; !ok {
-					currentVal.Changes[historicalPortNumber] = "removed"
-				}
-			}
-
-			// Only append currentVal to hostChanges if there are changes
-			if len(currentVal.Changes) > 0 {
-				hostChanges = append(hostChanges, currentVal)
-			}
-		} else {
-			// Handle case when there are no historical scan results for the host
-			if currentVal.Changes == nil {
-				currentVal.Changes = make(map[int]ChangeType)
-			}
-			for currentPortNumber := range currentVal.Ports {
-				currentVal.Changes[currentPortNumber] = "added"
-			}
-			hostChanges = append(hostChanges, currentVal)
-		}
-	}
-	fmt.Println("hostChanges", hostChanges)
-	// if there are no changes, we still need to add a ScanResult for each host with an updated ScanTime
-	if len(hostChanges) == 0 {
-		for _, currentScan := range results {
-			scanWithUpdatedTime := currentScan
-			scanWithUpdatedTime.Changes = make(map[int]ChangeType)
-			hostChanges = append(hostChanges, scanWithUpdatedTime)
-		}
-	}
-
-	return hostChanges
-}
-
-func prepareResponse(scanResults []ScanResult, hostChanges []ScanResult, historicalScanData interface{}) interface{} {
-	// Combine the latest scan results with the detected changes
-	for i, scan := range scanResults {
-		for _, change := range hostChanges {
-			if scan.Host == change.Host {
-				scanResults[i].Changes = change.Changes
-				break
-			}
-		}
-	}
-
-	// combine the scan results and historical scan data into a single struct
-	response := struct {
-		ScanResults        []ScanResult `json:"scan_results"`
-		HistoricalScanData interface{}  `json:"historical_scan_data"`
-	}{
-		ScanResults:        scanResults,
-		HistoricalScanData: historicalScanData,
-	}
-
-	return response
+	return host, scanResults, nil
 }

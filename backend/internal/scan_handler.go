@@ -46,7 +46,9 @@ func (s *Server) postScanPortsHandler(c *gin.Context) {
 		return
 	}
 
-	scanResponse, err := s.ScanClient.ScanPorts(ctx, req)
+	s.Logger.Debug("request received", zap.Any("request", req))
+
+	scanResponse, err := s.ScanClient.ScanForOpenPorts(ctx, req)
 	if err != nil {
 		s.Logger.Error("unable to scan ports", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, c.Error(err))

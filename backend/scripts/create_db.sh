@@ -1,4 +1,4 @@
-#!/bin/bash
+m#!/bin/bash
 # Database credentials
 DB_NAME="nmap_scans"
 DB_USER="default_user"

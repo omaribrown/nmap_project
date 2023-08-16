@@ -1,6 +1,8 @@
-
-
-# How to run:
+# Nmap Project
+## Description:
+This project is a web application that allows users to scan a website for open ports. The application will display the results of the scan and the history of the scan results. 
+# How to run (not functional):
+This section is incomplete, and will not run by following these instructions.
 ## Prepare & start the backend Go application
 Prepare the Database: Run this SQL query to create the MySQL database. The database name is nmap_project. The database user is `root` and the password is `Aventis2012`. The database is hosted on localhost:3306. The database is created with two tables: Hosts and ScanResults. The Hosts table stores the hostname and ip_address of the host. The ScanResults table stores the results of the port scan. The ScanResults table has a foreign key constraint on the Hosts table. 
 

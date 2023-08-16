@@ -2,11 +2,27 @@
 
 # How to run:
 ## Prepare & start the backend Go application
-Prepare the Database: Run the script located in the scripts directory to create the MySQL database.
+Prepare the Database: Run this SQL query to create the MySQL database. The database name is nmap_project. The database user is `root` and the password is `Aventis2012`. The database is hosted on localhost:3306. The database is created with two tables: Hosts and ScanResults. The Hosts table stores the hostname and ip_address of the host. The ScanResults table stores the results of the port scan. The ScanResults table has a foreign key constraint on the Hosts table. 
 
-```bash
-cd backend/scripts
-sh create-database.sh
+```sql
+create database nmap_project;
+
+use nmap_project;
+
+create table Hosts(
+    host_id int primary key auto_increment,
+    hostname varchar(255),
+    ip_address varchar(255) not null unique
+);
+
+create table ScanResults(
+    scan_id int primary key auto_increment,
+    ip_address varchar(255) not null,
+    port int not null,
+    timestamp timestamp,
+    status varchar(255),
+    foreign key (ip_address) references Hosts(ip_address)
+);
 ```
 Start the Servers: Run the script to start the MySQL server, GoLang server, and export required environment variables.
 
@@ -23,53 +39,50 @@ npm install
 npm run dev -- --open
 ```
 
+Examples:
 
-## Database Schema
-The database schema consists of four tables that store information related to host scans, port results, port changes, and port scan history.
+`www.medium.com`
 
-### `scan_results` Table
-This table stores the result of each host scan.
+```json
+{
+    "host": {
+        "ip_address": "162.159.153.4",
+        "hostname": "www.medium.com"
+    },
+    "scan_results": [
+        {
+            "ip_address": "162.159.153.4",
+            "timestamp": "2023-08-16T08:15:17-04:00",
+            "port": 80,
+            "status": "open"
+        },
+        {
+            "ip_address": "162.159.153.4",
+            "timestamp": "2023-08-16T08:15:17-04:00",
+            "port": 443,
+            "status": "open"
+        }
+    ],
+    "port_history": [
+        {
+            "scan_id": "69",
+            "ip_address": "162.159.153.4",
+            "timestamp": "2023-08-16T12:11:55Z",
+            "port": 80,
+            "status": "open"
+        },
+        {
+            "scan_id": "70",
+            "ip_address": "162.159.153.4",
+            "timestamp": "2023-08-16T12:11:55Z",
+            "port": 443,
+            "status": "open"
+        }
+    ]
+}
+```
 
-scan_id: (Primary Key) A unique identifier for each scan.
-
-host: The host or hostname scanned.
-
-scan_time: The timestamp of when the scan was performed.
-
-ip: The IP address of the host scanned.
-
-### `port_results` Table
-
-This table contains the result of port scans for each host.
-
-port_id: (Primary Key) A unique identifier for each port result.
-
-scan_id: (Foreign Key) References the scan_id in the scan_results table, linking the port result to a specific host scan.
-
-port_number: The port number scanned.
-
-status: The status of the port, e.g., open or closed.
-
-scan_time: The timestamp of when the port scan was performed.
-
-### `port_changes` Table
-This table tracks changes to port statuses over time.
-
-change_id: (Primary Key) A unique identifier for each change record.
-
-port_id: (Foreign Key) References the port_id in the port_results table, linking the change to a specific port result.
-
-change_type: The type of change, e.g., added or removed.
-
-scan_time: The timestamp of when the change was detected.
-
-### `port_scan_history` Table
-This table maintains the history of port scans for analysis.
-
-id: (Primary Key) A unique identifier for each scan history record.
-
-port_id: (Foreign Key) References the port_id in the port_results table, linking the scan history to a specific port result.
-
-scan_time: The timestamp of when the port scan was performed.
-
-status: The status of the port at the time of the scan.
+## todo:
+- consider whether we need to add the removed in comparison to the requirements. currently we only track the adds events
+- fix potential bug where history of port scans for unusual ports is not displayed
+- deploy database
